@@ -1,0 +1,5 @@
+INSTALLATION
+git clone https://github.com/jotenakis2/backupsystem
+cd backupsystem
+chmod +x backupsystem
+sudo cp backupsystem /usr/local/bin/
