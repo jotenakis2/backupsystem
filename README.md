@@ -37,7 +37,7 @@ Au premier lancement du script, il va créer des modèles des fichiers de config
 -R: restaure les sauvegardes COMPLÈTE et SPÉCIFIQUE dans les dossiers définis (point de montage local ou distant),
 -C: pour ne pas faire la sauvegarde COMPLÈTE et la sauvegarde ADDITIONNELLE,
 -H: pour ne pas faire la sauvegarde SPÉCIFIQUE,
--f myfile.conf: pour utiliser un fichier de configuration alternatif (myfile.conf).‘
+-f myfile.conf: pour utiliser un fichier de configuration alternatif (myfile.conf).
 ```
 > Une tâche cron peut être ajoutée pour automatiser des sauvegardes :
 	
