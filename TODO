@@ -1,5 +1,5 @@
 # TODO list
 - mode interactif,
-- gestion multi-utilisateurs,
+- gestion multi-utilisateurs (pour les crontabs),
 - gestion multi-dossiers pour la sauvegarde spécifique,
 - améliorer la gestion des dépendances (facultatives/obligatoires).
