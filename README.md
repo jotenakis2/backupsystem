@@ -17,6 +17,7 @@ Une sauvegarde ADDITIONNELLE des données suivantes sera également réalisée :
 Le script peut effectuer la sauvegarde sur un démon rsyncd distant ou dans un dossier (point de montage local ou distant).
 
 Dossier de configuration : /etc/backupsystem
+
 Fichiers de configuration :
 - backupsystem.conf, contient les options du script tel que, par exemple, le dossier de sauvegarde SPÉCIFIQUE.
  
