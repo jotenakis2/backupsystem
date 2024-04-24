@@ -23,23 +23,21 @@ Au premier lancement du script, il va créer des modèles des fichiers de config
 > Options disponibles :
 	
 ```
-	        -h              : affiche cette aide,
-		-v              : affiche le numéro de version & quitte,
-		-c              : vérifie & affiche la configuration, et contrôle que toutes les commandes nécessaires installées,
-		-0              : détruit le log à la fin du processus (mode "nolog"),
-		-V              : affiche le log à la fin de la sauvegarde,
-		-X              : affiche la sortie de la commande rsync pour suivre la progression de la sauvegarde,
-		-m              : envoie le log par email à la fin de la sauvegarde,
-				   nécessite l'installation et la configuration d'un logiciel smtp (comme msmtp ou ssmtp),
-		-D              : détruit toutes les sauvegardes de la machine,
-		-a              : lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde,
-		-A              : lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde et la transfère dans le cloud,
-		-d              : efface tous les logs de la machine,
-		-R              : restaure les sauvegardes COMPLÈTE et SPÉCIFIQUE dans les dossiers définis,
-				   (point de montage local ou distant),
-		-C              : pour ne pas faire la sauvegarde COMPLÈTE et la sauvegarde ADDITIONNELLE,
-		-H              : pour ne pas faire la sauvegarde SPÉCIFIQUE,
-		-f myfile.conf  : pour utiliser un fichier de configuration alternatif (myfile.conf).‘
+-h: affiche cette aide,
+-v: affiche le numéro de version & quitte,
+-c: vérifie & affiche la configuration, et contrôle que toutes les commandes nécessaires installées,
+-0: détruit le log à la fin du processus (mode "nolog"),
+-V: affiche le log à la fin de la sauvegarde,
+-X: affiche la sortie de la commande rsync pour suivre la progression de la sauvegarde,
+-m: envoie le log par email à la fin de la sauvegarde, nécessite l'installation et la configuration d'un logiciel smtp (comme msmtp ou ssmtp),
+-D: détruit toutes les sauvegardes de la machine,
+-a: lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde,
+-A: lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde et la transfère dans le cloud,
+-d: efface tous les logs de la machine,
+-R: restaure les sauvegardes COMPLÈTE et SPÉCIFIQUE dans les dossiers définis (point de montage local ou distant),
+-C: pour ne pas faire la sauvegarde COMPLÈTE et la sauvegarde ADDITIONNELLE,
+-H: pour ne pas faire la sauvegarde SPÉCIFIQUE,
+-f myfile.conf: pour utiliser un fichier de configuration alternatif (myfile.conf).‘
 ```
 > Une tâche cron peut être ajoutée pour automatiser des sauvegardes :
 	
