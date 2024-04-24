@@ -1,26 +1,32 @@
 # backupsystem
 Script de sauvegarde backupsystem
-> Utilisation :
+
+Utilisation :
 *sudo backupsystem [-0] [-C] [-H] [-R] [-v] [-a] [-A] [-c] [-V] [-X] [-h] [-D] [-d] [-m] [-f myfile.conf]*
 
-> Description :
-	Ce script doit être lancé avec les privilèges du superutilisateur root (voir les commandes sudo ou su).
-	Il permet une sauvegarde incrémentielle COMPLÈTE de votre système,
-	ainsi qu'une sauvegarde incrémentielle d'un dossier SPÉCIFIQUE (par exemple /home).
-	Une sauvegarde ADDITIONNELLE des données suivantes sera également réalisée :
-		- les fichiers crontab,
-		- la liste des paquets installés (paquets de la distribution et éventuels paquets Flatpak),
-		- la liste des fichiers du système.
-	Le script peut effectuer la sauvegarde sur un démon rsyncd distant ou dans un dossier (point de montage local ou distant).
+Description :
+Ce script doit être lancé avec les privilèges du superutilisateur root (voir les commandes sudo ou su).
+ 
+Il permet une sauvegarde incrémentielle COMPLÈTE de votre système, ainsi qu'une sauvegarde incrémentielle d'un dossier SPÉCIFIQUE (par exemple /home).
+ 
+Une sauvegarde ADDITIONNELLE des données suivantes sera également réalisée :
+- les fichiers crontab,
+- la liste des paquets installés (paquets de la distribution et éventuels paquets Flatpak),
+- la liste des fichiers du système.
 
-> Dossier de configuration : /etc/backupsystem
-> Fichiers de configuration :
-	- backupsystem.conf, contient les options du script tel que, par exemple, le dossier de sauvegarde SPÉCIFIQUE.
-	- exclusion-full.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde COMPLÈTE.
-	- exclusion.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde SPÉCIFIQUE.
+Le script peut effectuer la sauvegarde sur un démon rsyncd distant ou dans un dossier (point de montage local ou distant).
+
+Dossier de configuration : /etc/backupsystem
+Fichiers de configuration :
+- backupsystem.conf, contient les options du script tel que, par exemple, le dossier de sauvegarde SPÉCIFIQUE.
+ 
+- exclusion-full.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde COMPLÈTE.
+
+- exclusion.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde SPÉCIFIQUE.
+
 Au premier lancement du script, il va créer des modèles des fichiers de configuration à ajuster à votre système.
 
-> Options disponibles :
+Options disponibles :
 	
 ```
 -h: affiche cette aide,
