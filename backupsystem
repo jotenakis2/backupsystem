@@ -1,0 +1,1015 @@
+#!/bin/bash
+version="1.3.0"
+#################################################
+# Copyright OLIVIER LORILLU                     #
+# ce script est sous license GPL                #
+# https://www.gnu.org/licenses/gpl.html         #
+# To do List : - multi user crontabs            #
+#            control conf démon rsync.......    #
+#################################################
+set -u
+set -o pipefail
+now=""
+MODEF=""
+OUTCOME=""
+ARCHIVE="no"
+NOROOT="no"
+NOHOME="no"
+NOLOG="no"
+MODESCRIPT="sauvegarde"
+CONF="/etc/backupsystem/backupsystem.conf"
+EXCLUSION_FULL="/etc/backupsystem/exclusion-full.txt"
+EXCLUSION_HOME="/etc/backupsystem/exclusion.txt"
+TEMP_DIR="/root/.backupsystem"
+LOGFALLBACK="$TEMP_DIR/.fallbackLOGbackupsystem.log"
+LOG=$LOGFALLBACK
+LOGRSYNC=$LOGFALLBACK
+TERMINAL="$TERM"
+if [ "$TERM" = "dumb" ] || [ "$TERM" = "" ]; then
+	TERM="xterm"
+	noir='.'
+	rouge='.'
+	vert='.'
+	jaune='.'
+	bleu='.'
+	magenta='.'
+	cyan='.'
+	blanc='.'
+else
+	noir='\E[30m'
+	rouge='\E[31m'
+	vert='\E[32m'
+	jaune='\E[33m'
+	bleu='\E[36m'
+	magenta='\E[35m'
+	cyan='\E[34m'
+	blanc='\E[37m'
+fi
+################################################################################################################################
+#                                                                                                                              #
+#                                                                                                                              #
+#                   SOUS-ROUTINES DU SCRIPT                                                                                    #
+#                                                                                                                              #
+#                                                                                                                              #
+################################################################################################################################
+printbanner_centered() {
+[[ $# == 0 ]] && return 1
+if [ "$TERMINAL" = "dumb" ]; then
+	declare -i TERM_COLS=135
+else
+	declare -i TERM_COLS="$(tput cols)"
+	echo -e -n $3
+fi
+declare -i str_len="${#1}"
+[[ $str_len -ge $TERM_COLS ]] && {
+	echo "$1";
+	return 0;
+}
+declare -i filler_len="$(( (TERM_COLS - str_len) / 2 ))"
+[[ $# -ge 2 ]] && ch="${2:0:1}" || ch=" "
+filler=""
+for (( i = 0; i < filler_len; i++ )); do
+	filler="${filler}${ch}"
+done
+printf "%s%s%s" "$filler" "$1" "$filler"
+[[ $(( (TERM_COLS - str_len) % 2 )) -ne 0 ]] && printf "%s" "${ch}"
+printf "\n"
+return 0
+}
+################################################################################################################################
+cecho() { # script to write something to stdout in colors
+	message=${1}
+	color=${2}
+	nonewline=$3
+	if [ "$TERMINAL" != "dumb" ]; then
+		echo -e "$nonewline" "$color$message"
+		tput sgr0
+	else
+		echo "$nonewline" "$message"
+	fi
+	return 0
+}
+################################################################################################################################
+spinner() # to let user know script is working
+{
+local pid=$!
+local delay=0.3
+local spinstr='|/-\'
+while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+	local temp=${spinstr#?}
+	printf " [%c]  " "$spinstr"
+	local spinstr=$temp${spinstr%"$temp"}
+	sleep $delay
+	printf "\b\b\b\b\b\b"
+done
+[ "$TERMINAL" != "dumb" ] && echo -ne $vert
+printf "  \b\b[✓] "
+[ "$TERMINAL" != "dumb" ] && tput sgr0
+return 0
+}
+################################################################################################################################
+abspath() { # fonction qui renvoit le chemin absolu d un fichier
+#if [ ! -e "$1" ]; then
+#	return 1
+#fi
+file=""
+dir="$1"
+if [ ! -d "$dir" ]; then
+	file=$(basename "$dir")
+	dir=$(dirname "$dir")
+fi
+case "$dir" in
+	/*)	;;
+	*)	dir="$(pwd)/$dir"
+esac
+result=$(cd "$dir" && pwd)
+if [ -n "$file" ]; then
+	case "$result" in
+		*/)	;;
+		*)	result="$result/"
+	esac
+	result="$result$file"
+fi
+printf "%s\n" "$result"
+}
+################################################################################################################################
+CLEAN-TMP-FILES(){
+rm -f /tmp/backupsystem-* 2>/dev/null
+rm -f /tmp/output_cmds-* 2>/dev/null
+return 0
+}
+################################################################################################################################
+usage(){
+cecho "[INFO]" $vert -n && echo " utilisation: sudo $(basename $0) [-0] [-C] [-H] [-R] [-v] [-a] [-A] [-c] [-V] [-X] [-h] [-D] [-d] [-m] [-f myfile.conf]"
+return 0
+}
+################################################################################################################################
+dateEtheure(){
+now="$(date '+%T'), le $(date '+%A %d %B %Y')"
+return 0
+}
+################################################################################################################################
+CHECK_CMD(){ # check if command exist
+cmdmissing="no"
+for i in cat ls cp which rclone rsync rm awk sed tr grep numfmt tput nice df du mkdir tee tar zstdmt touch tail head find basename dirname date
+do
+	exist=$(which $i 2>/dev/null)
+	if [ "$exist" = "" ]; then
+		cecho "[ERREUR]" $rouge -n && echo " La commande $i est manquante, veuillez l'installer."
+		cmdmissing="yes"
+	fi
+done
+[ $cmdmissing = "yes" ] && exit 1 || return 0
+}
+################################################################################################################################
+HELP(){
+cat <<FIN
+> Utilisation :
+	sudo backupsystem [-0] [-C] [-H] [-R] [-v] [-a] [-A] [-c] [-V] [-X] [-h] [-D] [-d] [-m] [-f myfile.conf]
+
+> Description :
+	Ce script doit être lancé avec les privilèges du superutilisateur root (voir les commandes sudo ou su).
+	Il permet une sauvegarde incrémentielle COMPLÈTE de votre système,
+	ainsi qu'une sauvegarde incrémentielle d'un dossier SPÉCIFIQUE (par exemple /home).
+	Une sauvegarde ADDITIONNELLE des données suivantes sera également réalisée :
+		- les fichiers crontab,
+		- la liste des paquets installés (paquets de la distribution et éventuels paquets Flatpak),
+		- la liste des fichiers du système.
+	Le script peut effectuer la sauvegarde sur un démon rsyncd distant ou dans un dossier (point de montage local ou distant).
+
+> Dossier de configuration : /etc/backupsystem
+> Fichiers de configuration :
+	- backupsystem.conf, contient les options du script tel que, par exemple, le dossier de sauvegarde SPÉCIFIQUE.
+	- exclusion-full.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde COMPLÈTE.
+	- exclusion.txt, contient la liste des dossiers et fichiers exclus de la sauvegarde SPÉCIFIQUE.
+Au premier lancement du script, il va créer des modèles des fichiers de configuration à ajuster à votre système.
+
+> Options disponibles :
+	-h              : affiche cette aide,
+	-v              : affiche le numéro de version & quitte,
+	-c              : vérifie & affiche la configuration, et contrôle que toutes les commandes nécessaires installées,
+	-0              : détruit le log à la fin du processus (mode "nolog"),
+	-V              : affiche le log à la fin de la sauvegarde,
+	-X              : affiche la sortie de la commande rsync pour suivre la progression de la sauvegarde,
+	-m              : envoie le log par email à la fin de la sauvegarde,
+			   nécessite l'installation et la configuration d'un logiciel smtp (comme msmtp ou ssmtp),
+	-D              : détruit toutes les sauvegardes de la machine,
+	-a              : lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde,
+	-A              : lance une sauvegarde puis crée une archive tar.zst du dossier de sauvegarde et la transfère dans le cloud,
+	-d              : efface tous les logs de la machine,
+	-R              : restaure les sauvegardes COMPLÈTE et SPÉCIFIQUE dans les dossiers définis,
+			   (point de montage local ou distant),
+	-C              : pour ne pas faire la sauvegarde COMPLÈTE et la sauvegarde ADDITIONNELLE,
+	-H              : pour ne pas faire la sauvegarde SPÉCIFIQUE,
+	-f myfile.conf  : pour utiliser un fichier de configuration alternatif (myfile.conf).
+
+> Une tâche cron peut être ajoutée pour automatiser des sauvegardes :
+	- Par exemple, ajouter la ligne suivante dans /etc/crontab pour une sauvegarde automatique toutes les 6 heures
+	0 */6 * * * root /usr/local/bin/backupsystem
+
+	- Ou bien, pour une sauvegarde automatique mensuelle le 1er à 20h10
+	(en utilisant le fichier de conf ~/myfile.conf et en envoyant le log par email)
+	10 20 1 * * root /usr/local/bin/backupsystem -m -f ~/myfile.conf
+
+	- Ou bien, pour une sauvegarde SPÉCIFIQUE automatique quotidienne à minuit
+	0 0 * * * root /usr/local/bin/backupsystem -C
+
+	- Ou bien, pour créer une archive "tar.zst" de la sauvegarde tous les lundis à midi (pas de sauvegarde préalable)
+	0 12 * * 1 root /usr/local/bin/backupsystem -C -H -a
+FIN
+CLEAN-TMP-FILES
+dateEtheure && cecho "[INFO]" $vert -n && echo " Script terminé à $now."
+printbanner_centered "" "*" $bleu
+exit 0
+}
+################################################################################################################################
+OUTCOME_RSYNC(){
+tailleMO=$(numfmt --to=si $(cat "$LOGRSYNC" | grep "Total transferred file size" | tail -n 1 | awk -F ": " '{print $2}' | awk -F " bytes" '{print $1}' | sed 's/\,//g' | sed 's/\.//g'))
+totalMO=$(numfmt --to=si $(cat "$LOGRSYNC" | grep "Total file size" | tail -n 1 | awk -F ": " '{print $2}' | awk -F " bytes" '{print $1}' | sed 's/\,//g' | sed 's/\.//g'))
+NbFileTr=$(grep "Number of regular files transferred:" "$LOGRSYNC" | tail -n 1 | awk -F ": " '{print $2}' | sed 's/\.//g' | sed 's/\,//g')
+NbFileTot=$(grep "Number of files: " "$LOGRSYNC" | tail -n 1 | awk -F ": " '{print $2}' | awk -F\( '{print $1}' | sed 's/\.//g' | sed 's/\,//g')
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Nombre de fichiers transférés : ${NbFileTr} (sur ${NbFileTot}fichiers)" | tee -a "$LOG"
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Quantité de données transférées : ${tailleMO}o (sur ${totalMO}o)" | tee -a "$LOG"
+}
+################################################################################################################################
+BACKUP(){ # sauvegarde du dossier $REPERTOIRE_SOURCE
+printbanner_centered "SAUVEGARDE SPÉCIFIQUE" "." $cyan
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Fichier temporaire de sortie de rsync : \"$LOGRSYNC\"" >> "$LOG"
+echo >> "$LOG"
+if [ -d "$REPERTOIRE_SOURCE" ] && [ "$NOHOME" = "no" ];
+then
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Sauvegarde de $REPERTOIRE_SOURCE en cours... " | tee -a "$LOG"
+	echo >> "$LOG"
+	[ "$OUTCOME" = "verbose2" ] && echo && tail -f $LOGRSYNC &
+	cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $DELETE --exclude-from=$EXCLUSION_HOME \"$REPERTOIRE_SOURCE\" \"$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host\"" >> "$LOGRSYNC"
+	cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $DELETE --exclude-from=$EXCLUSION_HOME \"$REPERTOIRE_SOURCE\" \"$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host\"" >> "$LOG"
+	echo >> "$LOGRSYNC"
+	if [ "$TERMINAL" = "dumb" ] ; then # script lancé par cron
+		nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $DELETE --exclude-from=$EXCLUSION_HOME "$REPERTOIRE_SOURCE" "$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host" >> "$LOGRSYNC" 2>&1
+	else
+		nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $DELETE --exclude-from=$EXCLUSION_HOME "$REPERTOIRE_SOURCE" "$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host" >> "$LOGRSYNC" 2>&1 &
+		spinner
+	fi
+	[ "$OUTCOME" != "verbose2" ] && echo "Terminée."
+	OUTCOME_RSYNC
+else
+	if [ "$NOHOME" = "yes" ]; then
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le mode \"pas de sauvegarde spécifique\" est activé." | tee -a "$LOG"
+	else
+		cecho "[ALERTE]" $jaune -n | tee -a "$LOG" && echo " Le dossier à sauvegarder $REPERTOIRE_SOURCE (voir $CONF) n'existe pas." | tee -a "$LOG"
+	fi
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " La sauvegarde du dossier $REPERTOIRE_SOURCE a donc été ignorée." | tee -a "$LOG"
+fi
+}
+################################################################################################################################
+BACKUPFULL(){ # sauvegarde complète du système
+printbanner_centered "SAUVEGARDE COMPLÈTE" "." $cyan
+if [ "$NOROOT" = "no" ]
+then
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Sauvegarde du dossier / en cours...     " | tee -a "$LOG"
+	echo >> "$LOGRSYNC"
+	echo >> "$LOG"
+	if [ -d "$REPERTOIRE_SOURCE" ]; then
+		cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter \"- $REPERTOIRE_DESTINATION_FALLBACK/*\" --filter \"- $REPERTOIRE_SOURCE/*\" / \"$REPERTOIRE_DESTINATION/full$host\"" >> "$LOGRSYNC"
+		cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter \"- $REPERTOIRE_DESTINATION_FALLBACK/*\" --filter \"- $REPERTOIRE_SOURCE/*\" / \"$REPERTOIRE_DESTINATION/full$host\"" >> "$LOG"
+		echo >> "$LOGRSYNC"
+		if [ "$TERMINAL" = "dumb" ] ; then # script lancé par cron
+			nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" --filter "- $REPERTOIRE_SOURCE/*" / "$REPERTOIRE_DESTINATION/full$host" >> "$LOGRSYNC" 2>&1
+		else
+			nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" --filter "- $REPERTOIRE_SOURCE/*" / "$REPERTOIRE_DESTINATION/full$host" >> "$LOGRSYNC" 2>&1 &
+			spinner
+		fi
+	else
+		cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" / "$REPERTOIRE_DESTINATION/full$host"" >> "$LOGRSYNC"
+		cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" / "$REPERTOIRE_DESTINATION/full$host"" >> "$LOG"
+		echo >> "$LOGRSYNC"
+		if [ "$TERMINAL" = "dumb" ] ; then # script lancé par cron
+			nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" / "$REPERTOIRE_DESTINATION/full$host" >> "$LOGRSYNC" 2>&1
+		else
+			nice -n $NICENESS $rsync $RSYNC_OPTS_FULL $DELETE --exclude-from=$EXCLUSION_FULL --filter "- $REPERTOIRE_DESTINATION_FALLBACK/*" / "$REPERTOIRE_DESTINATION/full$host" >> "$LOGRSYNC" 2>&1 &
+			spinner
+		fi
+	fi
+	[ "$OUTCOME" = "verbose2" ] && killall tail 2>/dev/null || echo "Terminée."
+	OUTCOME_RSYNC
+else
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le mode \"pas de sauvegarde complète\" est activé." | tee -a "$LOG"
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " La sauvegarde du dossier / a donc été ignorée." | tee -a "$LOG"
+fi
+}
+################################################################################################################################
+BACKUPCRON(){ # sauvegarde des crontab utilisateur et globale
+printbanner_centered "SAUVEGARDE ADDITIONNELLE" "." $cyan
+if [ "$NOROOT" = "no" ]
+then
+	crontab -l > "$TEMP_DIR/crontab.root" 2>/dev/null
+	crontab -l -u $USERLOCAL > "$TEMP_DIR/crontab.$USERLOCAL" 2>/dev/null
+	cp /etc/crontab "$TEMP_DIR/crontab.global" 2>/dev/null
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Fichiers crontab.root, crontab.$USERLOCAL, crontab.global, " | tee -a "$LOG"
+else
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le mode \"pas de sauvegarde complète\" est activé." | tee -a "$LOG"
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " La sauvegarde additionnelle a également été ignorée." | tee -a "$LOG"
+fi
+}
+################################################################################################################################
+BACKUPPKG(){ # sauvegarde de la liste des paquets installés
+if [ "$NOROOT" = "no" ]
+then
+	flat=$(which flatpak 2>/dev/null)
+	if [ "$flat" != "" ]; then
+		NOFLATPAK="no"
+		nice -n $NICENESS flatpak list > "$TEMP_DIR/flatpak.list"
+		echo -n "flatpak.list, " | tee -a "$LOG"
+	else
+		NOFLATPAK="yes"
+	fi
+	case $distro in
+		*ubuntu*)       nice -n $NICENESS apt list --installed > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*debian*)       nice -n $NICENESS apt list --installed > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*arch*)         nice -n $NICENESS pacman -Qe > "$TEMP_DIR/pkg.list" 2>&1 && pacman -Qd >> "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*opensuse*)     nice -n $NICENESS rpm -qa > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*fedora*)       nice -n $NICENESS /usr/bin/dnf list installed > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*mint*)         nice -n $NICENESS apt list --installed > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*mageia*)       nice -n $NICENESS rpm -qa > "$TEMP_DIR/pkg.list" 2>&1 ;;
+		*gentoo*)       nice -n $NICENESS epm list > "$TEMP_DIR/pkg.list" 2>&1 ;;
+	esac
+	echo -n "pkg.list, " | tee -a "$LOG"
+fi
+}
+################################################################################################################################
+BACKUPLIST(){ # sauvegarde de la liste des fichiers installés sur le système
+if [ "$NOROOT" = "no" ]
+then
+	ls -alh /* > "$TEMP_DIR/files.list" 2>/dev/null
+	echo "et files.list crées." | tee -a "$LOG"
+	[ "$NOFLATPAK" = "yes" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Flatpak n'est pas installé." >> "$LOG"
+	qty=$(find $TEMP_DIR -maxdepth 1 -type f -print0 | du -ch --files0-from=- | grep total | awk '{print $1}')
+	echo >> "$LOGRSYNC"
+	cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $TEMP_DIR/* \"$REPERTOIRE_DESTINATION/\"" >> "$LOGRSYNC"
+	echo >> "$LOGRSYNC"
+	nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE $TEMP_DIR/* "$REPERTOIRE_DESTINATION/" >> "$LOGRSYNC" 2>&1
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Quantité de données transférées : ${qty}o" | tee -a "$LOG"
+fi
+}
+################################################################################################################################
+RESTORE(){
+printbanner_centered "RESTAURATION SPÉCIFIQUE" "." $cyan
+if [ -d "$RESTORE_DIR_HOME" ] && [ "$NOHOME" = "no" ]; then
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Restauration (dans $RESTORE_DIR_HOME) de la sauvegarde spécifique en cours... " | tee -a "$LOG"
+	echo >> "$LOGRSYNC"
+	echo >> "$LOG"
+	cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync -avz --stats $REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host/* \"$RESTORE_DIR_HOME\" " >> "$LOGRSYNC"
+	cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS $rsync -avz --stats $REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host/* \"$RESTORE_DIR_HOME\" " >> "$LOG"
+	if [ "$TERMINAL" = "dumb" ] ; then
+		nice -n $NICENESS $rsync -avz --stats $REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host/* "$RESTORE_DIR_HOME" >> "$LOGRSYNC" 2>&1
+	else
+		nice -n $NICENESS $rsync -avz --stats $REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host/* "$RESTORE_DIR_HOME" >> "$LOGRSYNC" 2>&1 &
+		spinner
+	fi
+	[ "$OUTCOME" = "verbose2" ] && killall tail 2>/dev/null || echo "Terminée."
+	OUTCOME_RSYNC
+else
+	if [ "$NOHOME" = "yes" ]; then
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le mode \"pas de restauration de la sauvegarde spécifique\" est activé." | tee -a "$LOG"
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " La restauration de \"$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host\" a donc été ignorée." | tee -a "$LOG"
+	fi
+	if [ ! -d "$RESTORE_DIR_HOME" ]; then
+		cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " Le dossier de restauration de la sauvegarde ($RESTORE_DIR_HOME) n'existe pas." | tee -a "$LOG"
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo "   Merci de corriger dans $CONF ou de créer le point de montage." | tee -a "$LOG"
+		printbanner_centered "" "*" $bleu
+		CLEAN-TMP-FILES
+		exit 1
+	fi
+fi
+}
+################################################################################################################################
+RESTOREFULL(){
+printbanner_centered "RESTAURATION COMPLÈTE" "." $cyan
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Fichier temporaire de sortie de rsync : \"$LOGRSYNC\"" >> "$LOG"
+echo >> "$LOG"
+if [ -d "$RESTORE_DIR_ROOT" ] && [ "$NOROOT" = "no" ]; then
+	[ "$OUTCOME" = "verbose2" ] && tail -f $LOGRSYNC &
+	cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Restauration (dans $RESTORE_DIR_ROOT) de la sauvegarde complète en cours... " | tee -a "$LOG"
+	echo >> "$LOG"
+	echo >> "$LOGRSYNC"
+	cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS $rsync -avz --stats \"$REPERTOIRE_DESTINATION/full$host/\" \"$RESTORE_DIR_ROOT\" " >> "$LOGRSYNC"
+	cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS $rsync -avz --stats \"$REPERTOIRE_DESTINATION/full$host/\" \"$RESTORE_DIR_ROOT\" " >> "$LOG"
+	if [ "$TERMINAL" = "dumb" ] ; then
+		nice -n $NICENESS $rsync -avz --stats "$REPERTOIRE_DESTINATION/full$host/" "$RESTORE_DIR_ROOT" >> "$LOGRSYNC" 2>&1
+	else
+		nice -n $NICENESS $rsync -avz --stats "$REPERTOIRE_DESTINATION/full$host/" "$RESTORE_DIR_ROOT" >> "$LOGRSYNC" 2>&1 &
+		spinner
+	fi
+	echo "Terminée."
+	echo >> "$LOGRSYNC"
+	OUTCOME_RSYNC
+else
+	if [ "$NOROOT" = "yes" ]; then
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le mode \"pas de restauration de la sauvegarde complète\" est activé." | tee -a "$LOG"
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " La restauration de \"$REPERTOIRE_DESTINATION/full$host\" a donc été ignorée." | tee -a "$LOG"
+	fi
+	if [ ! -d "$RESTORE_DIR_ROOT" ]; then
+		cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " Le dossier de restauration de la sauvegarde ($RESTORE_DIR_ROOT) n'existe pas." | tee -a "$LOG"
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo "   Merci de corriger dans $CONF ou de créer le point de montage." | tee -a "$LOG"
+		CLEAN-TMP-FILES
+		printbanner_centered "" "*" $bleu
+		exit 1
+	fi
+fi
+}
+################################################################################################################################
+ARCHIVE(){
+cloud="$1"
+archivename=$(abspath "$REPERTOIRE_DESTINATION_FALLBACK/../$host.tar.zst")
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Construction de l'archive $archivename en cours... " | tee -a "$LOG"
+echo >> "$LOG"
+echo >> "$LOGRSYNC"
+cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Construction de l'archive $archivename" >> "$LOGRSYNC"
+cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : nice -n $NICENESS tar -I 'zstdmt -7' -cvf \"$archivename\" \"$REPERTOIRE_DESTINATION_FALLBACK\"" >> "$LOGRSYNC"
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : nice -n $NICENESS tar -I 'zstdmt -7' -cvf \"$archivename\" \"$REPERTOIRE_DESTINATION_FALLBACK\"" >> "$LOG"
+if [ "$TERMINAL" = "dumb" ] ; then # script lancé par cron
+	nice -n $NICENESS $(which tar) -I 'zstdmt -7' -cvf "$archivename" "$REPERTOIRE_DESTINATION_FALLBACK" >> "$LOGRSYNC" 2>&1
+else
+	nice -n $NICENESS $(which tar) -I 'zstdmt -7' -cvf "$archivename" "$REPERTOIRE_DESTINATION_FALLBACK" >> "$LOGRSYNC" 2>&1 &
+	spinner
+fi
+echo "Terminée."
+tailleMO=$(find $archivename -type f -print0 | du -cm --files0-from=- | grep "$archivename" | awk '{print $1}')
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Taille de l'archive : ${tailleMO}Mo" | tee -a "$LOG"
+# rclone du tar
+if [ "$cloud" = "yes" ]; then
+	existcloud=$($(which rclone) listremotes | grep "$CLOUDSERVER")
+
+	if [ "$existcloud" = "$CLOUDSERVER" ] && [ -f /root/.config/rclone/rclone.conf ]; then
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -n " Envoi de l'archive $(basename $archivename) vers $CLOUDSERVER en cours... " | tee -a "$LOG"
+		cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Envoi de l'archive vers $CLOUDSERVER" >> "$LOGRSYNC"
+		echo >> "$LOG"
+		cecho "[INFO]" $vert -n >> "$LOGRSYNC" && echo " Ligne de commande : $(which rclone) --update --verbose copy \"$archivename\" \"$CLOUDSERVER\"" >> "$LOGRSYNC"
+		cecho "[INFO]" $vert -n >> "$LOG" && echo " Ligne de commande : $(which rclone) --update --verbose copy \"$archivename\" \"$CLOUDSERVER\"" >> "$LOG"
+		if [ "$TERMINAL" = "dumb" ] ; then # script lancé par cron
+			$(which rclone) --update --verbose copy "$archivename" "$CLOUDSERVER" >> "$LOGRSYNC" 2>&1
+		else
+			$(which rclone) --update --verbose copy "$archivename" "$CLOUDSERVER" >> "$LOGRSYNC" 2>&1 &
+			spinner
+		fi
+		echo "Terminée."
+		rcloneoutcome=$(cat "$LOGRSYNC" | grep "Transferred:" | tail -n2 | head -n1 | awk -F "Transferred:" '{print $2}' | awk -F, '{print $1 ", " $2", " $3}')
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo -e " Données de transfert rclone : $rcloneoutcome" | tee -a "$LOG"
+	else
+		cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " Le serveur cloud ($CLOUDSERVER) n'existe pas. Merci de vérifier $CONF." | tee -a "$LOG"
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Le transfert de $(basename $archivename) a été annulé." | tee -a "$LOG"
+	fi
+fi
+}
+################################################################################################################################
+CHECKDISTRO(){ # détection distro par 3 méthodes
+if [ -e /etc/os-release ]; then
+	distro=$(cat /etc/os-release | grep ^ID= | awk -F "=" '{print $2}' | head -n1 | sed 's/\"//g' | sed 's/[A-Z]/\L&/g' | sed 's/\s//g')
+else
+	if [ -e /etc/lsb-release ]; then
+		distro=$(cat /etc/lsb-release | grep ID | awk -F "=" '{print $2}' | head -n1 | sed 's/\"//g' | sed 's/[A-Z]/\L&/g' | sed 's/\s//g')
+	else
+		lsb=$(which lsb_release 2>/dev/null)
+		if [ "$lsb" = "" ]; then
+			distro="unknown"
+		else
+			distro=$(lsb_release -i | awk -F ":" '{print $2}' | head -n1 | sed 's/\s//g' | sed 's/[A-Z]/\L&/g' | sed 's/\"//g')
+		fi
+	fi
+fi
+case $distro in
+	"") distro="unknown";;
+	"biglinux"|"endeavouros"|"garuda"|"manjaro") distro="arch";;
+	"mx") distro="debian";;
+	"zorin") distro="ubuntu";;
+esac
+}
+################################################################################################################################
+VERSION(){
+cecho "[INFO]" $vert -n && echo " Ordinateur : $host"
+cecho "[INFO]" $vert -n && echo -n " Type de distribution : "
+case $distro in
+	*ubuntu*)       echo "Ubuntu";;
+	*debian*)       echo "Debian";;
+	*arch*)         echo "Arch";;
+	*opensuse*)     echo "OpenSuse";;
+	*fedora*)       echo "Fedora";;
+	*mint*)         echo "LinuxMint";;
+	*mageia*)		echo "Mageia" ;;
+	*gentoo*)		echo "Gentoo" ;;
+	*unknown*)      cecho "[ALERTE]" $jaune -n | tee -a "$LOG" && echo " Distribution non détectée (la LISTE des paquets ne sera pas sauvegardée, tout le reste le sera)";;
+esac
+dateEtheure && cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Script terminé à $now." | tee -a "$LOG"
+printbanner_centered "" "*" $bleu
+CLEAN-TMP-FILES
+exit 0
+}
+################################################################################################################################
+CREATE-CONF-TEMPLATE(){ # création du modèle des fichiers de conf
+	mkdir /etc/backupsystem 2>/dev/null
+	cecho "[ERREUR]" $rouge -n && echo " Le fichier de conf $CONF n'existe pas."
+	cecho "[INFO]" $vert -n && echo " Editez ce fichier pour l'ajuster à votre besoin, un modèle par défaut a été généré."
+
+echo '# fichier de configuration principal du script backupsystem
+
+# dossier spécifique à sauvegarder
+REPERTOIRE_SOURCE="/home"
+
+# dossier de sauvegarde
+REPERTOIRE_DESTINATION="/NAS/backup"
+
+# nom de l utilisateur principal autre que root
+USERLOCAL="username"
+
+# mail où envoyer le log (optionnel)
+EMAIL=""
+
+# Mode SYNCHRONISATION (Y/N)
+# en mode synchro, les fichiers supprimés du système sont supprimés dans la sauvegarde également
+DELETE="Y"
+
+# options rsync pour la sauvegarde du dossier REPERTOIRE_SOURCE et pour la sauvegarde totale
+RSYNC_OPTS_DIR_SOURCE="-avz --stats"
+RSYNC_OPTS_FULL="-avzAXHS --stats"
+
+# nice (priorité)
+NICENESS="10"
+
+# dossiers de restauration des sauvegardes
+RESTORE_DIR_ROOT="/mnt/tmp"
+RESTORE_DIR_HOME="/mnt/tmp/home"
+
+#### Optionnel : mode démon rsyncd distant
+# Y pour activer le mode démon rsyncd, N pour rester en mode "point de montage"
+RSYNCD_ENABLED="N"
+RSYNCD_IP="192.168.XXX.YYY"
+RSYNCD_PORT="873"
+RSYNCD_SHARE_NAME="rsyncnas"
+
+# rclone drive
+CLOUDSERVER="PCloud:"' > $CONF
+#
+echo '/dev/*
+/proc/*
+/sys/*
+/tmp/*
+/run/*
+/mnt/*
+/media/*
+/home/*
+lost+found/*
+/var/lib/flatpak/*
+/var/lib/dhcpcd/*
+/var/tmp/*
+/var/log/journal/*
+/var/lib/tpm2-tss/system/keystore
+cache/*
+.cache/*
+*.tmp
+*.iso
+*.img
+*.qcow2
+fish_history
+pCloudDrive/*
+.pcloud/*
+.gvfs/*
+.thumbnails/*
+Trash/*
+.snapshots/*
+.local/share/Trash/*' > $EXCLUSION_FULL
+#
+echo '*.tmp
+*.iso
+*.img
+*.qcow2
+fish_history
+pCloudDrive/*
+.pcloud/*
+.gvfs/*
+.thumbnails/*
+Trash/*
+.local/share/Trash/*
+lost+found/*
+.cache/*
+cache/*' > $EXCLUSION_HOME
+#
+	cecho "[INFO]" $vert -n && echo " Fichiers de configuration dans /etc/backupsystem :"
+	$(which ls) /etc/backupsystem
+	dateEtheure
+	cecho "[INFO]" $vert -n && echo " Script terminé à $now."
+	printbanner_centered "" "*" $bleu
+	CLEAN-TMP-FILES
+	exit 0
+}
+################################################################################################################################
+CHECKHOSTNAME(){ # détermine le nom du système
+	host=$(/usr/bin/hostnamectl --transient 2>/dev/null) || \
+	host=$(/usr/bin/hostname 2>/dev/null) || \
+	host=$(/usr/bin/uname -n 2>/dev/null) || \
+	host="UnknownSystem"
+}
+################################################################################################################################
+CHECKROOT(){
+if [ $UID -ne 0 ]; then
+	cecho "[ERREUR]" $rouge -n && echo " Attention, ce script doit être lancé avec les privilèges du superutilisateur ROOT (voir les commandes sudo ou su)."
+	exit 1
+else
+	[ ! -d $TEMP_DIR ] && mkdir $TEMP_DIR
+fi
+}
+################################################################################################################################
+CHECKCONF(){
+		freeFS=$(df --sync -ahT "$REPERTOIRE_DESTINATION" | grep -v autofs | tail -n1 | awk '{print $5}')
+		freeFS2=""
+		freeFS3=""
+		if [ -d "$RESTORE_DIR_HOME" ]; then
+			freeFS2=$(df --sync -ahT "$RESTORE_DIR_HOME" | grep -v autofs | tail -n1 | awk '{print $5}')
+		else
+			cecho "[ALERTE]" $jaune -n && echo " Attention, $RESTORE_DIR_HOME n'existe pas (nécessaire pour la restauration)."
+		fi
+		if [ -d "$RESTORE_DIR_ROOT" ]; then
+			freeFS3=$(df --sync -ahT "$RESTORE_DIR_ROOT" | grep -v autofs | tail -n1 | awk '{print $5}')
+		else
+			cecho "[ALERTE]" $jaune -n && echo " Attention, $RESTORE_DIR_ROOT n'existe pas (nécessaire pour la restauration)."
+		fi
+		REPERTOIRE_DESTINATION="$REPERTOIRE_DESTINATION/$host"
+		mkdir "$REPERTOIRE_DESTINATION" 2>/dev/null
+		mkdir "$REPERTOIRE_DESTINATION/log$host" 2>/dev/null
+		mkdir "$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host" 2>/dev/null
+		mkdir "$REPERTOIRE_DESTINATION/full$host" 2>/dev/null
+		datel="$(date +%s)"
+		LOG="/tmp/backupsystem-$datel.log"
+		LOGRSYNC="/tmp/output_cmds-$datel.txt"
+		LOGFINAL="$REPERTOIRE_DESTINATION/log$host/backupsystem-$datel.log"
+		LOGRSYNCFINAL="$REPERTOIRE_DESTINATION/log$host/output_cmds-$datel.txt"
+		touch "$LOG"
+		touch "$LOGRSYNC"
+		if grep -q "^$USERLOCAL:" /etc/passwd ; then # user existe
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Version du script : $version" >> "$LOG"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Chemin absolu du script : $(dirname $0)" >> "$LOG"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Options du script (ligne de commande) : $OPTS_FROM_CMDLINE" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Dossier spécifique à sauvegarder : $REPERTOIRE_SOURCE" >> "$LOG"
+			if [ ! -d "$REPERTOIRE_SOURCE" ] ; then
+				rm -rf "$REPERTOIRE_DESTINATION/$(basename $REPERTOIRE_SOURCE)$host" 2>/dev/null
+				if [ "$NOHOME" = "yes" ]; then
+					cecho "[ALERTE]" $jaune -n | tee -a "$LOG" && echo " Le dossier spécifique à sauvegarder $REPERTOIRE_SOURCE (voir $CONF) n'existe pas..." | tee -a "$LOG"
+				else
+					cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " Le dossier spécifique à sauvegarder $REPERTOIRE_SOURCE (voir $CONF) n'existe pas..." | tee -a "$LOG"
+					CLEAN-TMP-FILES
+					exit 0
+				fi
+			fi
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Dossier de stockage de la sauvegarde : $REPERTOIRE_DESTINATION (${freeFS}o disponibles)" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Utilisateur principal : $USERLOCAL" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " e-Mail : $EMAIL" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Mode synchronisation (option rsync) : $DELETE" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Options rsync de la sauvegarde spécifique : $RSYNC_OPTS_DIR_SOURCE" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Options rsync de la sauvegarde complète : $RSYNC_OPTS_FULL" >> "$LOG"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Priorité des processus : $NICENESS" >> "$LOG"
+			[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Sauvegarde sur un démon rsync activée ? : $RSYNCD_ENABLED" >> "$LOG"
+			if [ "$RSYNCD_ENABLED" = "Y" ] || [ "$RSYNCD_ENABLED" = "y" ] || [ "$MODEF" = "c" ] ; then
+				[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Adresse IP du démon rsync : $RSYNCD_IP" >> "$LOG"
+				[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Port d'écoute du démon rsync : $RSYNCD_PORT" >> "$LOG"
+				[ "$MODEF" = "" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Nom du partage du démon rsync : $RSYNCD_SHARE_NAME" >> "$LOG"
+			fi
+			if [ "$ARCHIVE" = "yes" ] || [ "$ARCHIVE" = "cloud" ] || [ "$MODEF" = "c" ]; then
+				cecho "[INFO]" $vert -n >> "$LOG" && echo " Serveur cloud (rclone) : $CLOUDSERVER" >> "$LOG"
+			fi
+			if [ -d "$RESTORE_DIR_ROOT" ] && [ "$MODEF" = "R" ] || [ "$MODEF" = "c" ]; then
+				cecho "[INFO]" $vert -n >> "$LOG"
+				echo " Dossier de restauration de la sauvegarde complète : $RESTORE_DIR_ROOT (${freeFS3}o disponibles)" >> "$LOG"
+			fi
+			if [ -d "$RESTORE_DIR_HOME" ] && [ "$MODEF" = "R" ] || [ "$MODEF" = "c" ]; then
+				cecho "[INFO]" $vert -n >> "$LOG"
+				echo " Dossier de restauration de la sauvegarde spécifique : $RESTORE_DIR_HOME (${freeFS2}o disponibles)" >> "$LOG"
+			fi
+			[ "$NOLOG" = "no" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Fichier de log du script : \"$LOGFINAL\"" >> "$LOG"
+			[ "$NOLOG" = "no" ] || [ "$MODEF" = "c" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Fichier de sortie des commandes de sauvegarde/restauration : \"$LOGRSYNCFINAL\"" >> "$LOG"
+		else # user n existe pas
+			echo >> "$LOG"
+			fault="ok"
+			cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " L'utilisateur \"$USERLOCAL\" n'existe pas. Veuillez vérifier $CONF." | tee -a "$LOG"
+		fi
+}
+################################################################################################################################
+CHECKRSYNC(){ # vérif présence rsync
+	rsync=$(which rsync 2>/dev/null)
+	if [ "$rsync" = "" ]; then
+        	cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo -n " rsync n'est pas disponible, il faut l'installer " | tee -a "$LOG"
+        	case $distro in
+        		*ubuntu*)       echo "(sudo apt install rsync)." | tee -a "$LOG";;
+        		*debian*)       echo "(sudo apt install rsync)." | tee -a "$LOG";;
+        		*arch*)         echo "(sudo pacman -Syu rsync)." | tee -a "$LOG";;
+        		*opensuse*)     echo "(sudo zypper install rsync)." | tee -a "$LOG";;
+        		*fedora*)       echo "(sudo dnf install rsync)." | tee -a "$LOG";;
+        		*mint*)         echo "(sudo apt install rsync)." | tee -a "$LOG";;
+				*mageia*)		echo "(sudo yum install rsync)." | tee -a "$LOG";;
+				*gentoo*)       echo "(sudo emerge --ask --oneshot net-misc/rsync)." | tee -a "$LOG";;
+			esac
+			fault="ok"
+	fi
+}
+################################################################################################################################
+LOADCONF(){ # charge la conf, contrôles, création arbo si besoin
+if [ -f "$CONF" ]; then
+	source $CONF
+	cecho "[INFO]" $vert -n > $LOGFALLBACK && echo " Lecture du fichier de configuration $CONF" >> $LOGFALLBACK
+	echo "Hostname : $host" >> $LOGFALLBACK
+	date >> $LOGFALLBACK
+else
+	cecho "[ERREUR]" $rouge -n && echo " $CONF n'existe pas." | tee $LOGFALLBACK
+	echo "Hostname : $host" >> $LOGFALLBACK
+	date >> $LOGFALLBACK
+	exit 1
+fi
+if [ "$DELETE" = "Y" ] || [ "$DELETE" = "y" ]; then # mode synchro
+	DELETE="--delete"
+else
+	DELETE=""
+fi
+fault=""
+# define cat or bat
+CAT=$(which bat 2>/dev/null)
+if [ "$CAT" = "" ]; then
+	CAT=$(which cat)
+else
+	CAT=$(which bat)
+fi
+#
+# Détecter la présence du volume de destination et interrompre l'opération si nécessaire
+if [ ! -d "$REPERTOIRE_DESTINATION" ]; then
+	cecho "[ERREUR]" $rouge -n | tee $LOGFALLBACK && echo " Le dossier cible de sauvegarde ($REPERTOIRE_DESTINATION) n'existe pas. Merci de vérifier $CONF." | tee -a $LOGFALLBACK
+	echo "Hostname : $host" >> $LOGFALLBACK
+	date >> $LOGFALLBACK
+	fault="ok"
+	LOGRSYNC=""
+	LOG=""
+else
+	CHECKCONF
+	REPERTOIRE_DESTINATION_FALLBACK=$REPERTOIRE_DESTINATION
+	CHECKRSYNC
+	MANAGE_RSYNCD_OPT
+fi
+
+if [ "$fault" = "ok" ]; then
+	CLEAN-TMP-FILES
+	exit 1
+fi
+}
+################################################################################################################################
+DELETEALL(){ # suppression des sauvegardes
+        cecho "[INFO]" $vert -n && echo " Nous allons supprimer le contenu de la sauvegarde : $REPERTOIRE_DESTINATION_FALLBACK"
+        if [ "$TERMINAL" = "dumb" ] ; then
+			rm -rf "$REPERTOIRE_DESTINATION_FALLBACK" 2>/dev/null
+		else
+			echo ">> ENTREE pour valider, CTRL+C pour QUITTER et ANNULER la suppression de la sauvegarde de $host <<"
+			read
+			cecho "[INFO]" $vert -n && echo -n " Suppression en cours... "
+			rm -rf "$REPERTOIRE_DESTINATION_FALLBACK" 2>/dev/null &
+			spinner
+			echo "Terminée"
+		fi
+		dateEtheure && cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Script terminé à $now." | tee -a "$LOG"
+		CLEAN-TMP-FILES
+		printbanner_centered "" "*" $bleu
+		exit 0
+}
+################################################################################################################################
+DELETELOG(){ # suppression des logs
+		cecho "[INFO]" $vert -n && echo " Nous allons supprimer les logs des sauvegardes : $REPERTOIRE_DESTINATION_FALLBACK/log$host"
+		if [ "$TERMINAL" = "dumb" ] ; then
+			rm -f "$REPERTOIRE_DESTINATION_FALLBACK/log$host/"*.log 2>/dev/null
+			rm -f "$REPERTOIRE_DESTINATION_FALLBACK/log$host/"*.txt 2>/dev/null
+		else
+			echo ">> ENTREE pour valider, CTRL+C pour QUITTER et ANNULER la suppression des logs de $host <<"
+			read
+			cecho "[INFO]" $vert -n && echo -n " Suppression en cours... "
+			rm -f "$REPERTOIRE_DESTINATION_FALLBACK/log$host/"*.log 2>/dev/null &
+			spinner
+			rm -f "$REPERTOIRE_DESTINATION_FALLBACK/log$host/"*.txt 2>/dev/null &
+			spinner
+			echo "Terminée"
+		fi
+		dateEtheure && cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Script terminé à $now." | tee -a "$LOG"
+		CLEAN-TMP-FILES
+		printbanner_centered "" "*" $bleu
+		exit 0
+}
+################################################################################################################################
+MANAGESWAP(){  # detect swaps and add it to exclusion' lists
+nbswap=$(cat /proc/swaps | grep ^/ | wc -l)
+tabswap=($(echo $(cat /proc/swaps | grep ^/ | awk '{print $1}')))
+if [ "$nbswap" -le 0 ]; then
+	[ "$MODEF" = "" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Pas de swap détecté" >> "$LOG"
+else
+	[ "$MODEF" = "" ] && cecho "[INFO]" $vert -n >> "$LOG" && echo " Swap(s) détecté(s) : ${tabswap[*]}" >> "$LOG"
+	for i in $(seq 1 $nbswap);
+	do
+		j=$((i-1))
+		existswapfull=$(cat $EXCLUSION_FULL | grep "${tabswap[$j]}")
+		existswaphome=$(cat $EXCLUSION_HOME | grep "${tabswap[$j]}")
+		if [ "$existswapfull" = "" ]; then
+			echo "${tabswap[$j]}" >> $EXCLUSION_FULL
+		fi
+		if [ "$existswaphome" = "" ]; then
+			echo "${tabswap[$j]}" >> $EXCLUSION_HOME
+		fi
+	done
+fi
+}
+################################################################################################################################
+SENDEMAIL(){  # envoi email
+        mail=$(which mail 2>/dev/null)
+        if [ "$mail" != "" ]; then
+			USERLOCAL="root"
+			dateEtheure
+			cat "$LOG" "$LOGRSYNC" | $mail -s "[$host] backupsystem - $now" $EMAIL
+        else
+			cecho "[ALERTE]" $jaune -n && echo " La commande mail n'est pas disponible sur votre système."
+			cecho "[INFO]" $vert -n && echo " Veuillez installer un Mail Transport Agent (postfix, msmtp,...)"
+        fi
+}
+################################################################################################################################
+MANAGE_RSYNCD_OPT(){ # Mode démon rsync, on change la destination avec syntaxe basée sur l'IP et le nom du partage distant rsync
+if [ "$RSYNCD_ENABLED" = "Y" ] || [ "$RSYNCD_ENABLED" = "y" ]; then
+	if [ "$MODEF" = "" ]; then
+		test='([1-9]?[0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])'
+		if [[ $RSYNCD_IP =~ ^$test\.$test\.$test\.$test$ ]]; then # contrôle la validité de l'IP du démon rsync (IPv4)
+			REPERTOIRE_DESTINATION="$RSYNCD_IP::$RSYNCD_SHARE_NAME/$host"
+			RSYNC_OPTS_DIR_SOURCE="--port=$RSYNCD_PORT $RSYNC_OPTS_DIR_SOURCE"
+			RSYNC_OPTS_FULL="--port=$RSYNCD_PORT $RSYNC_OPTS_FULL"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Options vers le démon rsyncd ($REPERTOIRE_SOURCE): $RSYNC_OPTS_DIR_SOURCE" >> "$LOG"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Options vers le démon rsyncd (/): $RSYNC_OPTS_FULL" >> "$LOG"
+			cecho "[INFO]" $vert -n >> "$LOG" && echo " Chemin du démon rsyncd : $REPERTOIRE_DESTINATION" >> "$LOG"
+		else
+			cecho "[ERREUR]" $rouge -n | tee -a "$LOG" && echo " L'adresse IP ($RSYNCD_IP) du démon rsyncd n'est pas une adresse IPV4 valide" | tee -a "$LOG"
+			cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Merci de corriger dans le fichier $CONF." | tee -a "$LOG"
+			CLEAN-TMP-FILES
+			exit 1
+		fi
+	fi
+fi
+}
+################################################################################################################################
+CHECKERROR(){ # contrôle présence d'erreurs de sauvegarde rsync
+printbanner_centered "RÉSULTATS" "." $cyan
+if [ "$NOROOT" = "no" ] || [ "$NOHOME" = "no" ] ; then
+	echo >> "$LOG"
+	ERROR=$(cat "$LOGRSYNC" | grep "^rsync")
+	if [ "$ERROR" != "" ]; then
+		cecho "[ALERTE]" $jaune -n | tee -a "$LOG" && echo " Des erreurs de copie ont été détectées :" | tee -a "$LOG"
+		cat "$LOGRSYNC" | grep "^rsync" | tee -a "$LOG"
+	else
+		cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Aucune erreur de copie n'a été détectée." | tee -a "$LOG"
+	fi
+fi
+}
+################################################################################################################################
+INITLOG(){ # gestion initiale du fichier de log
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Terminal : $TERMINAL" >> "$LOG"
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Systèmes de fichiers montés :" >> "$LOG"
+df -h -x tmpfs -x devtmpfs -x overlay -x efivarfs --output=target,source,fstype,size,used,avail,pcent >> "$LOG"
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Distribution détectée : $distro" >> "$LOG"
+if [ "$NOHOME" = "no" ] && [ "$MODESCRIPT" = "sauvegarde" ]; then
+	cecho "[INFO]" $vert -n >> "$LOG" && echo " Exclusions de la sauvegarde du dossier spécifique :" >> "$LOG"
+	tr '\n' ' ' < "$EXCLUSION_HOME" >> "$LOG"
+	echo >> "$LOG"
+fi
+if [ "$NOROOT" = "no" ] && [ "$MODESCRIPT" = "sauvegarde" ]; then
+	cecho "[INFO]" $vert -n >> "$LOG" && echo " Exclusions de la sauvegarde complète :" >> "$LOG"
+	tr '\n' ' ' < "$EXCLUSION_FULL" >> "$LOG"
+	echo >> "$LOG"
+fi
+}
+################################################################################################################################
+INFOLOG(){
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Mode $MODESCRIPT." | tee -a "$LOG"
+[ "$NOLOG" = "yes" ] && cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Mode \"nolog\". Le log sera détruit à la fin de la $MODESCRIPT." | tee -a "$LOG"
+if [ "$OUTCOME" != "verbose2" ] ; then
+	cecho "[INFO]" $vert -n && echo -n " Vous pouvez suivre le log, dans un autre terminal, avec la commande : "
+	echo "tail -f -n60 $LOG"
+fi
+}
+################################################################################################################################
+ENDLOG(){ # fin du log
+echo >> "$LOG"
+cecho "[INFO]" $vert -n >> "$LOG" && echo " Liste des fichiers et dossiers de la $MODESCRIPT :" >> "$LOG"
+if [ "$MODESCRIPT" = "restauration" ]; then
+	echo "- $RESTORE_DIR_ROOT" >> "$LOG"
+	ls "$RESTORE_DIR_ROOT" >> "$LOG"
+	echo "- $RESTORE_DIR_HOME" >> "$LOG"
+	ls "$RESTORE_DIR_HOME" >> "$LOG"
+else
+	ls "$REPERTOIRE_DESTINATION_FALLBACK"/* >> "$LOG"
+fi
+echo >> "$LOG"
+}
+################################################################################################################################
+BACKUPLOG(){
+nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE "$LOG" $REPERTOIRE_DESTINATION/log$host/ > /dev/null 2>&1
+nice -n $NICENESS $rsync $RSYNC_OPTS_DIR_SOURCE "$LOGRSYNC" $REPERTOIRE_DESTINATION/log$host/ > /dev/null 2>&1
+}
+################################################################################################################################
+OUTCOMES(){
+# la variable SECONDS contient automatiquement le nb de secondes écoulées depuis le lancement du script
+# conversion SECONDS en MINUTES
+MINUTES=$(printf "%.1f\n" $((10**3*$SECONDS/60))e-3)
+case "$OUTCOME" in
+	"") 		if [ "$NOLOG" = "no" ] ; then
+					cecho "[INFO]" $vert -n && echo " Log : \"$LOGFINAL\" "
+					cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Sortie rsync : \"$LOGRSYNCFINAL\"" | tee -a "$LOG"
+				fi;;
+	"verbose")	if [ "$NOLOG" = "no" ] ; then
+					cecho "[INFO]" $vert -n && echo " Log : \"$LOGFINAL\" "
+					cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Sortie rsync : \"$LOGRSYNCFINAL\"" | tee -a "$LOG"
+				fi
+				$CAT "$LOG";;
+	"verbose2")	if [ "$NOLOG" = "no" ] ; then
+					cecho "[INFO]" $vert -n && echo " Log : \"$LOGFINAL\" "
+					cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Sortie rsync : \"$LOGRSYNCFINAL\"" | tee -a "$LOG"
+				fi;;
+	"email")	SENDEMAIL
+				cecho "[INFO]" $vert -n && echo " Logs envoyés à $EMAIL";;
+esac
+cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Durée d'exécution du script : ${MINUTES} min" | tee -a "$LOG"
+dateEtheure && cecho "[INFO]" $vert -n | tee -a "$LOG" && echo " Script terminé à $now." | tee -a "$LOG"
+}
+################################################################################################################################
+
+
+
+################################################################################################################################
+#                                                                                                                              #
+#                                                                                                                              #
+#                   CORPS DU SCRIPT                                                                                            #
+#                                                                                                                              #
+#                                                                                                                              #
+################################################################################################################################
+[ "$TERMINAL" != "dumb" ] && clear
+CLEAN-TMP-FILES
+printbanner_centered " SCRIPT DE SAUVEGARDE v$version ($0) " "*" $bleu
+dateEtheure && cecho "[INFO]" $vert -n && echo " Script démarré à $now."
+CHECKROOT
+CHECK_CMD
+CHECKDISTRO
+CHECKHOSTNAME
+[ ! -e $CONF ] && CREATE-CONF-TEMPLATE
+# gestion de la ligne de commande
+OPTS_FROM_CMDLINE="$*"
+while getopts '0CHRXaAhvVmdDcf:' OPTION
+do
+	case "$OPTION" in
+		0)	NOLOG="yes";;
+		v)	MODEF="v";;
+		h)	MODEF="h";;
+		a)	ARCHIVE="yes";;
+		A)	ARCHIVE="cloud";;
+		D)	MODEF="D";;
+		d)	MODEF="d";;
+		c)	MODEF="c";;
+		R)	MODEF="R";;
+		C)	NOROOT="yes";;
+		H)	NOHOME="yes";;
+		V)	OUTCOME="verbose";;
+		X)	OUTCOME="verbose2";;
+		m)	OUTCOME="email";;
+		f)	CONF="$OPTARG";;
+		\?)	usage >&2
+			exit 1;;
+	esac
+done
+shift "$(($OPTIND -1))"
+LOADCONF
+case $MODEF in
+	d) DELETELOG;;
+	D) DELETEALL;;
+	v) VERSION;;
+	h) HELP;;
+	R) MODESCRIPT="restauration";;
+	c) head -n18 "$LOG"
+	   CLEAN-TMP-FILES
+	   printbanner_centered "" "*" $bleu
+	   exit 0;;
+esac
+INFOLOG
+MANAGESWAP
+INITLOG
+case $MODESCRIPT in
+	"sauvegarde")	BACKUP
+					BACKUPFULL
+					BACKUPCRON
+					BACKUPPKG
+					BACKUPLIST;;
+	"restauration")	RESTOREFULL
+					RESTORE
+					ARCHIVE="no";;
+esac
+CHECKERROR
+ENDLOG
+[ "$ARCHIVE" = "yes" ] && ARCHIVE no
+[ "$ARCHIVE" = "cloud" ] && ARCHIVE yes
+OUTCOMES
+[ "$NOLOG" = "no" ] && BACKUPLOG
+CLEAN-TMP-FILES
+printbanner_centered "" "*" $bleu
+exit 0
